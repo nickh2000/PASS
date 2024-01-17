@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -41,29 +40,10 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-#if defined ( __ICCARM__ ) /*!< IAR Compiler */
-#pragma location=0x2004c000
-ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x2004c0a0
-ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
+ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
-#elif defined ( __CC_ARM )  /* MDK ARM Compiler */
-
-__attribute__((at(0x2004c000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x2004c0a0))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __GNUC__ ) /* GNU Compiler */
-ETH_DMADescTypeDef DMARxDscrTab[ETH_RX_DESC_CNT] __attribute__((section(".RxDecripSection"))); /* Ethernet Rx DMA Descriptors */
-ETH_DMADescTypeDef DMATxDscrTab[ETH_TX_DESC_CNT] __attribute__((section(".TxDecripSection")));   /* Ethernet Tx DMA Descriptors */
-
-#endif
-
-ETH_TxPacketConfig TxConfig;
-
-ADC_HandleTypeDef hadc3;
-DMA_HandleTypeDef hdma_adc3;
-
-ETH_HandleTypeDef heth;
+SAI_HandleTypeDef hsai_BlockA1;
 
 UART_HandleTypeDef huart3;
 
@@ -77,10 +57,10 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
+static void MX_SAI1_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
-static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
-static void MX_ADC3_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -88,22 +68,34 @@ static void MX_ADC3_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 unsigned char MSG[35] = "hello there\n";
+uint32_t adc_get;
+uint16_t sai_fifo[16];
 
-uint16_t adc_get;
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	sprintf(MSG, "ADC Read=%lu\r\n", adc_get);
 	HAL_UART_Transmit(&huart3, MSG, sizeof(MSG), 0xFFFF);
-    HAL_ADC_Start_DMA(&hadc3, &adc_get, 1);
+    HAL_ADC_Start_DMA(hadc, &adc_get, 1);
 
 }
+//
+//void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
+//
+//	  sprintf(MSG, "SAI sent");
+//	  HAL_UART_Transmit(&huart3, MSG, sizeof(MSG), 0xFFFF);
+//	  if (HAL_SAI_Transmit_IT(&hsai, (uint8_t*)&sai_fifo, 16) != HAL_OK){
+//	  	  Error_Handler();
+//	  }
+//
+//}
+
 /* USER CODE END 0 */
 
 /**
   * @brief  The application entry point.
   * @retval int
   */
-
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -129,29 +121,31 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  MX_SAI1_Init();
   MX_USB_OTG_FS_PCD_Init();
-  MX_ETH_Init();
   MX_USART3_UART_Init();
-  MX_ADC3_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-  HAL_ADC_Start_DMA(&hadc3, &adc_get, 1);
-
+  sai_fifo[0] = 1024;
+  HAL_ADC_Start_DMA(&hadc1, &adc_get, 1);
   while (1)
   {
+	  for (int i = 1; i < 16; i ++)
+		  sai_fifo[i] = sai_fifo[i - 1];
+	sai_fifo[0] = adc_get;
+	HAL_SAI_Transmit(&hsai_BlockA1, (uint8_t*)&sai_fifo, 32, -1);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
-
-
 
 /**
   * @brief System Clock Configuration
@@ -194,7 +188,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV16;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
@@ -203,103 +197,102 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief ADC3 Initialization Function
+  * @brief ADC1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ADC3_Init(void)
+static void MX_ADC1_Init(void)
 {
 
-  /* USER CODE BEGIN ADC3_Init 0 */
+  /* USER CODE BEGIN ADC1_Init 0 */
 
-  /* USER CODE END ADC3_Init 0 */
+  /* USER CODE END ADC1_Init 0 */
 
   ADC_ChannelConfTypeDef sConfig = {0};
 
-  /* USER CODE BEGIN ADC3_Init 1 */
+  /* USER CODE BEGIN ADC1_Init 1 */
 
-  /* USER CODE END ADC3_Init 1 */
+  /* USER CODE END ADC1_Init 1 */
 
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
-  hadc3.Instance = ADC3;
-  hadc3.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc3.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc3.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc3.Init.ContinuousConvMode = DISABLE;
-  hadc3.Init.DiscontinuousConvMode = DISABLE;
-  hadc3.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc3.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc3.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc3.Init.NbrOfConversion = 1;
-  hadc3.Init.DMAContinuousRequests = ENABLE;
-  hadc3.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc3) != HAL_OK)
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC3_Init 2 */
+  /* USER CODE BEGIN ADC1_Init 2 */
 
-  /* USER CODE END ADC3_Init 2 */
+  /* USER CODE END ADC1_Init 2 */
 
 }
 
 /**
-  * @brief ETH Initialization Function
+  * @brief SAI1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ETH_Init(void)
+static void MX_SAI1_Init(void)
 {
 
-  /* USER CODE BEGIN ETH_Init 0 */
+  /* USER CODE BEGIN SAI1_Init 0 */
 
-  /* USER CODE END ETH_Init 0 */
+  /* USER CODE END SAI1_Init 0 */
 
-   static uint8_t MACAddr[6];
+  /* USER CODE BEGIN SAI1_Init 1 */
 
-  /* USER CODE BEGIN ETH_Init 1 */
-
-  /* USER CODE END ETH_Init 1 */
-  heth.Instance = ETH;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
-  heth.Init.MACAddr = &MACAddr[0];
-  heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
-  heth.Init.TxDesc = DMATxDscrTab;
-  heth.Init.RxDesc = DMARxDscrTab;
-  heth.Init.RxBuffLen = 1524;
-
-  /* USER CODE BEGIN MACADDRESS */
-
-  /* USER CODE END MACADDRESS */
-
-  if (HAL_ETH_Init(&heth) != HAL_OK)
+  /* USER CODE END SAI1_Init 1 */
+  hsai_BlockA1.Instance = SAI1_Block_A;
+  hsai_BlockA1.Init.Protocol = SAI_FREE_PROTOCOL;
+  hsai_BlockA1.Init.AudioMode = SAI_MODEMASTER_TX;
+  hsai_BlockA1.Init.DataSize = SAI_DATASIZE_8;
+  hsai_BlockA1.Init.FirstBit = SAI_FIRSTBIT_MSB;
+  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
+  hsai_BlockA1.Init.Synchro = SAI_ASYNCHRONOUS;
+  hsai_BlockA1.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE;
+  hsai_BlockA1.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
+  hsai_BlockA1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
+  hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_48K;
+  hsai_BlockA1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
+  hsai_BlockA1.Init.MonoStereoMode = SAI_STEREOMODE;
+  hsai_BlockA1.Init.CompandingMode = SAI_NOCOMPANDING;
+  hsai_BlockA1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
+  hsai_BlockA1.FrameInit.FrameLength = 256;
+  hsai_BlockA1.FrameInit.ActiveFrameLength = 100;
+  hsai_BlockA1.FrameInit.FSDefinition = SAI_FS_STARTFRAME;
+  hsai_BlockA1.FrameInit.FSPolarity = SAI_FS_ACTIVE_LOW;
+  hsai_BlockA1.FrameInit.FSOffset = SAI_FS_FIRSTBIT;
+  hsai_BlockA1.SlotInit.FirstBitOffset = 0;
+  hsai_BlockA1.SlotInit.SlotSize = SAI_SLOTSIZE_DATASIZE;
+  hsai_BlockA1.SlotInit.SlotNumber = 16;
+  hsai_BlockA1.SlotInit.SlotActive = 0x0000FFFF;
+  if (HAL_SAI_Init(&hsai_BlockA1) != HAL_OK)
   {
     Error_Handler();
   }
-
-  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-  TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
-  /* USER CODE BEGIN ETH_Init 2 */
-
-  /* USER CODE END ETH_Init 2 */
+  /* USER CODE BEGIN SAI1_Init 2 */
+  /* USER CODE END SAI1_Init 2 */
 
 }
 
@@ -401,8 +394,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
@@ -410,19 +403,21 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD3_Pin|LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : USER_Btn_Pin */
-  GPIO_InitStruct.Pin = USER_Btn_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  /*Configure GPIO pin : RMII_TXD1_Pin */
+  GPIO_InitStruct.Pin = RMII_TXD1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(USER_Btn_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(RMII_TXD1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin */
-  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|LD2_Pin;
+  /*Configure GPIO pins : LD3_Pin LD2_Pin */
+  GPIO_InitStruct.Pin = LD3_Pin|LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -458,8 +453,11 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  unsigned char error[25] = "Error occured!";
   while (1)
   {
+
+	 HAL_UART_Transmit(&huart3, error, sizeof(error), 0xFFFF);
   }
   /* USER CODE END Error_Handler_Debug */
 }
