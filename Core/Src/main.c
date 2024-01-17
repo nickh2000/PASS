@@ -77,9 +77,9 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_ETH_Init(void);
+static void MX_USART3_UART_Init(void);
 static void MX_ADC3_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -87,13 +87,23 @@ static void MX_ADC3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+unsigned char MSG[35] = "hello there\n";
 
+uint16_t adc_get;
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+	sprintf(MSG, "ADC Read=%lu\r\n", adc_get);
+	HAL_UART_Transmit(&huart3, MSG, sizeof(MSG), 0xFFFF);
+    HAL_ADC_Start_DMA(&hadc3, &adc_get, 1);
+
+}
 /* USER CODE END 0 */
 
 /**
   * @brief  The application entry point.
   * @retval int
   */
+
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -119,9 +129,9 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_ETH_Init();
+  MX_USART3_UART_Init();
   MX_ADC3_Init();
   /* USER CODE BEGIN 2 */
 
@@ -129,26 +139,19 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  unsigned char MSG[35] = {"\0"};
 
-  uint64_t adc_get;
+  HAL_ADC_Start_DMA(&hadc3, &adc_get, 1);
 
   while (1)
   {
-	HAL_ADC_Start(&hadc3);
-	if (HAL_ADC_PollForConversion(&hadc3, -1) == HAL_OK) {
-		adc_get = HAL_ADC_GetValue(&hadc3);
-		sprintf(MSG, "ADC Read=%lu\r\n", adc_get);
-		HAL_UART_Transmit(&huart3, MSG, sizeof(MSG), 0xFFFF);
-	}
-	HAL_ADC_Stop(&hadc3);
-	HAL_Delay(500);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
+
+
 
 /**
   * @brief System Clock Configuration
@@ -229,7 +232,7 @@ static void MX_ADC3_Init(void)
   hadc3.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc3.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc3.Init.NbrOfConversion = 1;
-  hadc3.Init.DMAContinuousRequests = DISABLE;
+  hadc3.Init.DMAContinuousRequests = ENABLE;
   hadc3.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc3) != HAL_OK)
   {
