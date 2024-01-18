@@ -70,15 +70,16 @@ static void MX_ADC1_Init(void);
 unsigned char MSG[35] = "hello there\n";
 uint32_t adc_get;
 uint16_t sai_fifo[16];
+uint16_t dma_buf;
 
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-{
-	sprintf(MSG, "ADC Read=%lu\r\n", adc_get);
-	HAL_UART_Transmit(&huart3, MSG, sizeof(MSG), 0xFFFF);
-    HAL_ADC_Start_DMA(hadc, &adc_get, 1);
-
-}
+//void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+//{
+////	adc_get = dma_buf;
+//	sprintf(MSG, "ADC Read=%lu\r\n", adc_get);
+//	HAL_UART_Transmit(&huart3, MSG, sizeof(MSG), 0xFFFF);
+////    HAL_ADC_Start_DMA(hadc, &adc_get, 1);
+//
+//}
 //
 //void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 //
@@ -131,14 +132,14 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  sai_fifo[0] = 1024;
   HAL_ADC_Start_DMA(&hadc1, &adc_get, 1);
+  sai_fifo[0] = 128;
   while (1)
   {
-	  for (int i = 1; i < 16; i ++)
+	  for (int i = 15; i > 0; i --)
 		  sai_fifo[i] = sai_fifo[i - 1];
 	sai_fifo[0] = adc_get;
-	HAL_SAI_Transmit(&hsai_BlockA1, (uint8_t*)&sai_fifo, 32, -1);
+	HAL_SAI_Transmit(&hsai_BlockA1, &sai_fifo, 16, -1);
 
     /* USER CODE END WHILE */
 
@@ -220,7 +221,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
@@ -266,7 +267,7 @@ static void MX_SAI1_Init(void)
   hsai_BlockA1.Instance = SAI1_Block_A;
   hsai_BlockA1.Init.Protocol = SAI_FREE_PROTOCOL;
   hsai_BlockA1.Init.AudioMode = SAI_MODEMASTER_TX;
-  hsai_BlockA1.Init.DataSize = SAI_DATASIZE_8;
+  hsai_BlockA1.Init.DataSize = SAI_DATASIZE_16;
   hsai_BlockA1.Init.FirstBit = SAI_FIRSTBIT_MSB;
   hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
   hsai_BlockA1.Init.Synchro = SAI_ASYNCHRONOUS;
