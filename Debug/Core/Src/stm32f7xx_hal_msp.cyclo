@@ -8,4 +8,4 @@
 ../Core/Src/stm32f7xx_hal_msp.c:322:6:HAL_PCD_MspInit	3
 ../Core/Src/stm32f7xx_hal_msp.c:376:6:HAL_PCD_MspDeInit	2
 ../Core/Src/stm32f7xx_hal_msp.c:407:6:HAL_SAI_MspInit	5
-../Core/Src/stm32f7xx_hal_msp.c:484:6:HAL_SAI_MspDeInit	3
+../Core/Src/stm32f7xx_hal_msp.c:477:6:HAL_SAI_MspDeInit	3

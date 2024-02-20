@@ -62,9 +62,9 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_SAI1_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
-static void MX_ADC1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -78,18 +78,18 @@ uint16_t dma_buf;
 uint32_t adc_avg;
 int avg_count;
 
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-{
-	adc_avg += adc_get;
-	avg_count ++;
-
-}
+//void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+//{
+//	adc_avg += adc_get;
+//	avg_count ++;
+//
+//}
 
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 
-  for (int i = 15; i > 0; i --)
-	  sai_fifo[i] = sai_fifo[i - 1];
-  adc_avg = (adc_avg / avg_count);
+//  for (int i = 15; i > 0; i --)
+//	  sai_fifo[i] = sai_fifo[i - 1];
+//  adc_avg = (adc_avg / avg_count);
   sai_fifo[0] = (uint16_t)((short)((adc_get << 4) - (1 << 15)) >> 0) & (~0x3);
 //  sai_fifo[0] = 0x7000;//(adc_get << 4) - (1 << 15);
   adc_avg = 0;
@@ -152,9 +152,9 @@ int main(void)
   MX_DMA_Init();
   MX_SAI1_Init();
   MX_USB_OTG_FS_PCD_Init();
-  MX_ADC1_Init();
   MX_I2C2_Init();
   MX_USART3_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -163,15 +163,15 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   HAL_ADC_Start_DMA(&hadc1, &adc_get, 1);
   HAL_SAI_Transmit_DMA(&hsai_BlockA1, &sai_fifo, 16);
-  sai_fifo[0] = 0x0F0FU;
+  sai_fifo[0] = 0x7000U;
 
   HAL_Delay(1000);
 
   char str[100] = "check\r\n";
   uint8_t mute_data = 0;	//0 is normal operation, 1 is muted
-  uint8_t pll_clk_data = 1;
+  uint8_t pll_clk_data = 0b01000001; //assert reset and pllin = 01 to use DLRCLK reference
   uint8_t dac_ctrl0 = 0b01100000;
-  uint8_t pll_clk_data1 = 0b01000000;
+  uint8_t pll_clk_data1 = 0b11000000;
   uint8_t dac_ctl1 = 0b10000;
 
   HAL_UART_Transmit(&huart3, str, strlen((char*)str), HAL_MAX_DELAY);
@@ -268,7 +268,7 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV6;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -367,19 +367,18 @@ static void MX_SAI1_Init(void)
   hsai_BlockA1.Init.AudioMode = SAI_MODEMASTER_TX;
   hsai_BlockA1.Init.DataSize = SAI_DATASIZE_16;
   hsai_BlockA1.Init.FirstBit = SAI_FIRSTBIT_MSB;
-  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
+  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_RISINGEDGE;
   hsai_BlockA1.Init.Synchro = SAI_ASYNCHRONOUS;
   hsai_BlockA1.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE;
   hsai_BlockA1.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
   hsai_BlockA1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
-  hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_MCKDIV;
-  hsai_BlockA1.Init.Mckdiv = 9;
+  hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_8K;
   hsai_BlockA1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
   hsai_BlockA1.Init.MonoStereoMode = SAI_STEREOMODE;
   hsai_BlockA1.Init.CompandingMode = SAI_NOCOMPANDING;
   hsai_BlockA1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
   hsai_BlockA1.FrameInit.FrameLength = 256;
-  hsai_BlockA1.FrameInit.ActiveFrameLength = 9;
+  hsai_BlockA1.FrameInit.ActiveFrameLength = 1;
   hsai_BlockA1.FrameInit.FSDefinition = SAI_FS_STARTFRAME;
   hsai_BlockA1.FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
   hsai_BlockA1.FrameInit.FSOffset = SAI_FS_FIRSTBIT;
