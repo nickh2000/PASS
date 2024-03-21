@@ -41,12 +41,13 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
-DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c2;
 
 SAI_HandleTypeDef hsai_BlockA1;
+SAI_HandleTypeDef hsai_BlockB1;
 DMA_HandleTypeDef hdma_sai1_a;
+DMA_HandleTypeDef hdma_sai1_b;
 
 UART_HandleTypeDef huart3;
 
@@ -58,6 +59,7 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void PeriphCommonClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_SAI1_Init(void);
@@ -71,52 +73,113 @@ static void MX_ADC1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-unsigned char MSG[35] = "hello there\n";
-uint16_t adc_get;
-uint16_t sai_fifo[16];
-uint16_t dma_buf;
-uint32_t adc_avg;
-int avg_count;
+#define AUDIO_LOW_BUF_SIZE 12
+#define AUDIO_HIGH_BUF_SIZE 14 * 20
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+uint16_t adc_get[2];
+uint32_t sai_fifo_a[16];
+uint32_t sai_fifo_b[16];
+uint16_t audio_buf_low[AUDIO_LOW_BUF_SIZE];
+uint16_t audio_buf_high[AUDIO_HIGH_BUF_SIZE];
+int delay = 0;
 
-//void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-//{
-//	adc_avg += adc_get;
-//	avg_count ++;
-//
-//}
 
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 
-//  for (int i = 15; i > 0; i --)
-//	  sai_fifo[i] = sai_fifo[i - 1];
-//  adc_avg = (adc_avg / avg_count);
-  sai_fifo[0] = (uint16_t)((short)((adc_get << 4) - (1 << 15)) >> 0) & (~0x3);
-//  sai_fifo[0] = 0x7000;//(adc_get << 4) - (1 << 15);
-  adc_avg = 0;
-  avg_count = 0;
+	static int circ_offset_low = 0;
+	static int circ_offset_high = 0;
+
+
+	if(hsai == &hsai_BlockB1) return;
+
+	__disable_irq();
+	HAL_ADC_Start(&hadc1);
+	HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+	adc_get[0] = HAL_ADC_GetValue(&hadc1);
+//	HAL_ADC_Stop(&hadc1);
+
+
+
+	audio_buf_high[circ_offset_high] = (adc_get[0] << 4) - (1 << 15);
+	audio_buf_low[circ_offset_low] = (adc_get[0] << 4) - (1 << 15);
+
+	circ_offset_high = (circ_offset_high + 1) % AUDIO_HIGH_BUF_SIZE;
+	circ_offset_low = (circ_offset_low + 1) % AUDIO_LOW_BUF_SIZE;
+
+	int buf_index;
+	//Fill the 12 subwoofers
+	for(int i = 0; i < 12; i ++) {
+		buf_index = (delay * i + (AUDIO_LOW_BUF_SIZE >> 1) + circ_offset_low) % AUDIO_LOW_BUF_SIZE;
+		buf_index = MAX(buf_index, 0);
+		sai_fifo_a[i] = audio_buf_low[buf_index];
+	}
+	//Fill the first 4 tweeters into the remaining space in DAC 1
+//	for(int i = 12; i < 16; i ++) {
+//		buf_index = delay * i + (AUDIO_HIGH_BUF_SIZE >> 1);
+//		buf_index = MIN(AUDIO_HIGH_BUF_SIZE, MAX(buf_index, 0));
+//		sai_fifo_a[i] = audio_buf_high[buf_index];
+//	}
+//	//Fill the remaining 16 tweeters into DAC 2
+//	for(int i = 16; i < 32; i ++) {
+//		buf_index = delay * i + (AUDIO_HIGH_BUF_SIZE  >> 1);
+//		buf_index = MIN(AUDIO_HIGH_BUF_SIZE, MAX(buf_index, 0));
+//		sai_fifo_b[i - 16] = audio_buf_high[buf_index];
+//	}
+	__enable_irq();
+////	char msg[100];
+////	sprintf(msg, "adc1 is %d; ", adc_get[0]);
+////
+////	char msg1[100];
+////	sprintf(msg1, "adc2 is %d\r\n", adc_get[1]);
+////	HAL_UART_Transmit(&huart3, msg, strlen((char*)msg), HAL_MAX_DELAY);
+////	HAL_UART_Transmit(&huart3, msg1, strlen((char*)msg1), HAL_MAX_DELAY);
+
+
 }
 
-#define ADAU_ADDR 0x04
+#define DAC1_ADDR 0x04
+#define DAC2_ADDR 0x24
 #define DAC_MUTE1 0x09
 #define PLL_CLK_CTRL0 0x00
 #define DAC_CTRL0 0x06
+#define DAC_CTRL1 0x07
+#define DAC_CTRL2 0x08
 
 
-void write_register(uint8_t reg, uint8_t* data) {
-	HAL_StatusTypeDef ret = HAL_I2C_Mem_Write(&hi2c2, ADAU_ADDR << 1, reg,
+uint8_t mute_data_DAC1 = 0x0;	//0 is normal operation, 1 is muted
+uint8_t mute_data_DAC2 = 0x0;
+uint8_t pll_clk_data = 0b01000001; //assert reset and pllin = 01 to use DLRCLK reference
+uint8_t dac_ctrl0 = 0b01100000;
+uint8_t dac_ctrl1 = 0b10000100;
+uint8_t dac_ctrl2 = 0b10000;
+
+
+
+void write_DAC1(uint8_t reg, uint8_t* data) {
+	HAL_StatusTypeDef ret = HAL_I2C_Mem_Write(&hi2c2, DAC1_ADDR << 1, reg,
             1, data, 1, HAL_MAX_DELAY);
-
-
-
 	char str_fail[100];
-	char str_success[100] = "Success occured!\r\n";
+	char str_success[100] = "Success on DAC1!\r\n";
 	if (ret != HAL_OK) {
-		sprintf(str_fail, "Error is %d", HAL_I2C_GetError(&hi2c2));
+		sprintf(str_fail, "Error is %d on DAC1; Register=0x%02X, Data=0x%02x\r\n", HAL_I2C_GetError(&hi2c2), reg, *data);
 		HAL_UART_Transmit(&huart3, str_fail, strlen((char*)str_fail), HAL_MAX_DELAY);
 	} else {
 		HAL_UART_Transmit(&huart3, str_success, strlen((char*)str_success), HAL_MAX_DELAY);
 	}
+}
 
+void write_DAC2(uint8_t reg, uint8_t* data) {
+	HAL_StatusTypeDef ret = HAL_I2C_Mem_Write(&hi2c2, DAC2_ADDR << 1, reg,
+            1, data, 1, HAL_MAX_DELAY);
+	char str_fail[100];
+	char str_success[100] = "Success occured!\r\n";
+	if (ret != HAL_OK) {
+		sprintf(str_fail, "Error is %d on DAC2; Register=0x%02X, Data=0x%02x\r\n", HAL_I2C_GetError(&hi2c2), reg, *data);
+		HAL_UART_Transmit(&huart3, str_fail, strlen((char*)str_fail), HAL_MAX_DELAY);
+	} else {
+		HAL_UART_Transmit(&huart3, str_success, strlen((char*)str_success), HAL_MAX_DELAY);
+	}
 }
 
 /* USER CODE END 0 */
@@ -143,6 +206,9 @@ int main(void)
   /* Configure the system clock */
   SystemClock_Config();
 
+/* Configure the peripherals common clocks */
+  PeriphCommonClock_Config();
+
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
@@ -157,36 +223,52 @@ int main(void)
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  HAL_ADC_Start_DMA(&hadc1, &adc_get, 1);
-  HAL_SAI_Transmit_DMA(&hsai_BlockA1, &sai_fifo, 16);
-  sai_fifo[0] = 0x7000U;
 
-  HAL_Delay(1000);
-
-  char str[100] = "check\r\n";
-  uint8_t mute_data = 0;	//0 is normal operation, 1 is muted
-  uint8_t pll_clk_data = 0b01000001; //assert reset and pllin = 01 to use DLRCLK reference
-  uint8_t dac_ctrl0 = 0b01100000;
-  uint8_t pll_clk_data1 = 0b11000000;
-  uint8_t dac_ctl1 = 0b10000;
-
-  HAL_UART_Transmit(&huart3, str, strlen((char*)str), HAL_MAX_DELAY);
+  __disable_irq();
+//  HAL_ADC_Start_DMA(&hadc1, &adc_get, 2);
+  sai_fifo_a[0] = 0x7000U;
+  sai_fifo_b[0] = 0x7000U;
+  int error;
+  error = HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint32_t * )&sai_fifo_a, 16);
+  char error_msg[50];
+  sprintf(error_msg, "Error is %d on DMA1\r\n", error);
+  HAL_UART_Transmit(&huart3, error_msg, strlen((char*)error_msg), HAL_MAX_DELAY);
 
 
-  write_register(PLL_CLK_CTRL0, &pll_clk_data);
-  write_register(DAC_MUTE1, &mute_data);
-  write_register(DAC_CTRL0, &dac_ctrl0);
-  write_register(0x07, &pll_clk_data1);
-  write_register(0x08, &dac_ctl1);
+  error = HAL_SAI_Transmit_DMA(&hsai_BlockB1, (uint32_t * )&sai_fifo_b, 16);
+  sprintf(error_msg, "Error is %d on DMA2\r\n", error);
+  HAL_UART_Transmit(&huart3, error_msg, strlen((char*)error_msg), HAL_MAX_DELAY);
+
+  //HAL_Delay(1000);
 
 
 
-  char str2[100] = "check2\r\n";
-  HAL_UART_Transmit(&huart3, str2, strlen((char*)str2), HAL_MAX_DELAY);
+  sprintf(error_msg, "UART good!\r\n");
+
+  HAL_UART_Transmit(&huart3, error_msg, strlen((char*)error_msg), HAL_MAX_DELAY);
+
+
+  write_DAC1(PLL_CLK_CTRL0, &pll_clk_data);
+  write_DAC1(DAC_MUTE1, &mute_data_DAC1);
+  write_DAC1(DAC_CTRL0, &dac_ctrl0);
+  write_DAC1(DAC_CTRL1, &dac_ctrl1);
+  write_DAC1(DAC_CTRL2, &dac_ctrl2);
+
+  write_DAC2(PLL_CLK_CTRL0, &pll_clk_data);
+write_DAC2(DAC_MUTE1, &mute_data_DAC2);
+write_DAC2(DAC_CTRL0, &dac_ctrl0);
+write_DAC2(DAC_CTRL1, &dac_ctrl1);
+write_DAC2(DAC_CTRL2, &dac_ctrl2);
+
+
+  __enable_irq();
+
+
 
   while (1)
   {
@@ -239,9 +321,33 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV16;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief Peripherals Common Clock Configuration
+  * @retval None
+  */
+void PeriphCommonClock_Config(void)
+{
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
+  /** Initializes the peripherals clock
+  */
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI1|RCC_PERIPHCLK_CLK48;
+  PeriphClkInitStruct.PLLSAI.PLLSAIN = 50;
+  PeriphClkInitStruct.PLLSAI.PLLSAIR = 2;
+  PeriphClkInitStruct.PLLSAI.PLLSAIQ = 2;
+  PeriphClkInitStruct.PLLSAI.PLLSAIP = RCC_PLLSAIP_DIV2;
+  PeriphClkInitStruct.PLLSAIDivQ = 1;
+  PeriphClkInitStruct.PLLSAIDivR = RCC_PLLSAIDIVR_2;
+  PeriphClkInitStruct.Sai1ClockSelection = RCC_SAI1CLKSOURCE_PLLSAI;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
@@ -268,16 +374,16 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
@@ -289,6 +395,15 @@ static void MX_ADC1_Init(void)
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -367,26 +482,53 @@ static void MX_SAI1_Init(void)
   hsai_BlockA1.Init.AudioMode = SAI_MODEMASTER_TX;
   hsai_BlockA1.Init.DataSize = SAI_DATASIZE_16;
   hsai_BlockA1.Init.FirstBit = SAI_FIRSTBIT_MSB;
-  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_RISINGEDGE;
+  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
   hsai_BlockA1.Init.Synchro = SAI_ASYNCHRONOUS;
   hsai_BlockA1.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE;
   hsai_BlockA1.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
   hsai_BlockA1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
-  hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_8K;
+  hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_MCKDIV;
+  hsai_BlockA1.Init.Mckdiv = 2;
   hsai_BlockA1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
   hsai_BlockA1.Init.MonoStereoMode = SAI_STEREOMODE;
   hsai_BlockA1.Init.CompandingMode = SAI_NOCOMPANDING;
   hsai_BlockA1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
   hsai_BlockA1.FrameInit.FrameLength = 256;
   hsai_BlockA1.FrameInit.ActiveFrameLength = 1;
-  hsai_BlockA1.FrameInit.FSDefinition = SAI_FS_STARTFRAME;
+  hsai_BlockA1.FrameInit.FSDefinition = SAI_FS_CHANNEL_IDENTIFICATION;
   hsai_BlockA1.FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
-  hsai_BlockA1.FrameInit.FSOffset = SAI_FS_FIRSTBIT;
+  hsai_BlockA1.FrameInit.FSOffset = SAI_FS_BEFOREFIRSTBIT;
   hsai_BlockA1.SlotInit.FirstBitOffset = 0;
   hsai_BlockA1.SlotInit.SlotSize = SAI_SLOTSIZE_DATASIZE;
   hsai_BlockA1.SlotInit.SlotNumber = 16;
   hsai_BlockA1.SlotInit.SlotActive = 0x0000FFFF;
   if (HAL_SAI_Init(&hsai_BlockA1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  hsai_BlockB1.Instance = SAI1_Block_B;
+  hsai_BlockB1.Init.Protocol = SAI_FREE_PROTOCOL;
+  hsai_BlockB1.Init.AudioMode = SAI_MODESLAVE_TX;
+  hsai_BlockB1.Init.DataSize = SAI_DATASIZE_16;
+  hsai_BlockB1.Init.FirstBit = SAI_FIRSTBIT_MSB;
+  hsai_BlockB1.Init.ClockStrobing = SAI_CLOCKSTROBING_RISINGEDGE;
+  hsai_BlockB1.Init.Synchro = SAI_SYNCHRONOUS;
+  hsai_BlockB1.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE;
+  hsai_BlockB1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
+  hsai_BlockB1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
+  hsai_BlockB1.Init.MonoStereoMode = SAI_STEREOMODE;
+  hsai_BlockB1.Init.CompandingMode = SAI_NOCOMPANDING;
+  hsai_BlockB1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
+  hsai_BlockB1.FrameInit.FrameLength = 256;
+  hsai_BlockB1.FrameInit.ActiveFrameLength = 1;
+  hsai_BlockB1.FrameInit.FSDefinition = SAI_FS_CHANNEL_IDENTIFICATION;
+  hsai_BlockB1.FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
+  hsai_BlockB1.FrameInit.FSOffset = SAI_FS_BEFOREFIRSTBIT;
+  hsai_BlockB1.SlotInit.FirstBitOffset = 0;
+  hsai_BlockB1.SlotInit.SlotSize = SAI_SLOTSIZE_DATASIZE;
+  hsai_BlockB1.SlotInit.SlotNumber = 16;
+  hsai_BlockB1.SlotInit.SlotActive = 0x0000FFFF;
+  if (HAL_SAI_Init(&hsai_BlockB1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -475,12 +617,12 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
   /* DMA2_Stream1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+  /* DMA2_Stream4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
 
 }
 
