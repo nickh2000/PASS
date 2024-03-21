@@ -73,17 +73,33 @@ static void MX_ADC1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define AUDIO_LOW_BUF_SIZE 12
-#define AUDIO_HIGH_BUF_SIZE 14 * 20
+#define AUDIO_LOW_BUF_SIZE 180
+#define AUDIO_HIGH_BUF_SIZE 15* 20
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 uint16_t adc_get[2];
 uint32_t sai_fifo_a[16];
 uint32_t sai_fifo_b[16];
 uint16_t audio_buf_low[AUDIO_LOW_BUF_SIZE];
-uint16_t audio_buf_high[AUDIO_HIGH_BUF_SIZE];
-int delay = 0;
+//uint16_t audio_buf_high[AUDIO_HIGH_BUF_SIZE];
+int32_t delay = 0;
 
+uint16_t read_ADC_Channel(ADC_HandleTypeDef* hadc, int channel) {
+	ADC_ChannelConfTypeDef chConfig = { 0 };
+	chConfig.Channel = channel;
+	chConfig.Rank = 1;
+	chConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+	HAL_ADC_ConfigChannel(hadc, &chConfig);
+	HAL_ADC_Start(hadc);
+	int status = HAL_ADC_PollForConversion(hadc, HAL_MAX_DELAY);
+		  if (status != HAL_OK) {
+			Error_Handler();
+		  }
+	uint16_t val = HAL_ADC_GetValue(hadc);
+//	HAL_ADC_Stop(hadc);
+
+	return val;
+}
 
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 
@@ -94,15 +110,14 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 	if(hsai == &hsai_BlockB1) return;
 
 	__disable_irq();
-	HAL_ADC_Start(&hadc1);
-	HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-	adc_get[0] = HAL_ADC_GetValue(&hadc1);
-//	HAL_ADC_Stop(&hadc1);
+	adc_get[0] = read_ADC_Channel(&hadc1, 0);
+	adc_get[1] = read_ADC_Channel(&hadc1, 3);
+	delay = (read_ADC_Channel(&hadc1, 4) - 2000) * 7 / 2048;
 
 
 
-	audio_buf_high[circ_offset_high] = (adc_get[0] << 4) - (1 << 15);
-	audio_buf_low[circ_offset_low] = (adc_get[0] << 4) - (1 << 15);
+//	audio_buf_high[circ_offset_high] = (adc_get[0] << 4) - (1 << 15);
+	audio_buf_low[circ_offset_low] = (adc_get[1] << 4) - (1 << 15);
 
 	circ_offset_high = (circ_offset_high + 1) % AUDIO_HIGH_BUF_SIZE;
 	circ_offset_low = (circ_offset_low + 1) % AUDIO_LOW_BUF_SIZE;
@@ -377,12 +392,12 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.NbrOfConversion = 3;
   hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -404,6 +419,15 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_REGULAR_RANK_2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Rank = ADC_REGULAR_RANK_3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -488,7 +512,7 @@ static void MX_SAI1_Init(void)
   hsai_BlockA1.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
   hsai_BlockA1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
   hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_MCKDIV;
-  hsai_BlockA1.Init.Mckdiv = 2;
+  hsai_BlockA1.Init.Mckdiv = 7;
   hsai_BlockA1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
   hsai_BlockA1.Init.MonoStereoMode = SAI_STEREOMODE;
   hsai_BlockA1.Init.CompandingMode = SAI_NOCOMPANDING;

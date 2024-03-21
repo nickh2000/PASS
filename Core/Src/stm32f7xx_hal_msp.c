@@ -98,8 +98,9 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     /**ADC1 GPIO Configuration
     PA0/WKUP     ------> ADC1_IN0
     PA3     ------> ADC1_IN3
+    PA4     ------> ADC1_IN4
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_3;
+    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_3|GPIO_PIN_4;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -130,8 +131,9 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     /**ADC1 GPIO Configuration
     PA0/WKUP     ------> ADC1_IN0
     PA3     ------> ADC1_IN3
+    PA4     ------> ADC1_IN4
     */
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0|GPIO_PIN_3);
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0|GPIO_PIN_3|GPIO_PIN_4);
 
   /* USER CODE BEGIN ADC1_MspDeInit 1 */
 
@@ -426,7 +428,7 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef* hsai)
     hdma_sai1_a.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
     hdma_sai1_a.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
     hdma_sai1_a.Init.Mode = DMA_CIRCULAR;
-    hdma_sai1_a.Init.Priority = DMA_PRIORITY_LOW;
+    hdma_sai1_a.Init.Priority = DMA_PRIORITY_VERY_HIGH;
     hdma_sai1_a.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     if (HAL_DMA_Init(&hdma_sai1_a) != HAL_OK)
     {
@@ -473,7 +475,7 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef* hsai)
     hdma_sai1_b.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
     hdma_sai1_b.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
     hdma_sai1_b.Init.Mode = DMA_CIRCULAR;
-    hdma_sai1_b.Init.Priority = DMA_PRIORITY_LOW;
+    hdma_sai1_b.Init.Priority = DMA_PRIORITY_VERY_HIGH;
     hdma_sai1_b.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     if (HAL_DMA_Init(&hdma_sai1_b) != HAL_OK)
     {
