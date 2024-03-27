@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "math.h"
+#include "arm_math.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,10 +63,10 @@ void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_SAI1_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_SAI1_Init(void);
 static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -73,16 +74,41 @@ static void MX_ADC1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint32_t fftSize = 1024;
+uint32_t ifftFlag = 0;
+uint32_t doBitReverse = 1;
+arm_rfft_instance_q15 fft_instance;
+arm_rfft_instance_q15 ifft_instance;
+q15_t fft_in_buf[300];
+q15_t fft_out_buf[300*2];
+q15_t fft_out_buf_mag[300*2];
+q15_t ifft_out_buf[300];
+float audio_buf_high_f[300];
+
+/* Reference index at which max energy of bin ocuurs */
+uint32_t refIndex = 213, testIndex = 0;
+/* --------------------------------------
+ *
+ *
+ */
 #define AUDIO_LOW_BUF_SIZE 180
-#define AUDIO_HIGH_BUF_SIZE 15* 20
+#define AUDIO_HIGH_BUF_SIZE 300
+#define AUDIO_LOW_BUF_SIZE_HALF 90
+#define AUDIO_HIGH_BUF_SIZE_HALF 150
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 uint16_t adc_get[2];
 uint32_t sai_fifo_a[16];
 uint32_t sai_fifo_b[16];
 uint16_t audio_buf_low[AUDIO_LOW_BUF_SIZE];
-//uint16_t audio_buf_high[AUDIO_HIGH_BUF_SIZE];
-int32_t delay = 0;
+uint16_t audio_buf_high[AUDIO_HIGH_BUF_SIZE];
+uint8_t delay_denom = 8;
+
+
+static inline int16_t interpolate(uint16_t x, uint8_t delay_n, uint16_t* array, int dir, uint16_t size) {
+	return ((array[x % size] * (delay_denom - delay_n)+ array[(x + dir + size) % size] * delay_n) >> 3) - 32768;
+}
 
 uint16_t read_ADC_Channel(ADC_HandleTypeDef* hadc, int channel) {
 	ADC_ChannelConfTypeDef chConfig = { 0 };
@@ -105,49 +131,94 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 
 	static int circ_offset_low = 0;
 	static int circ_offset_high = 0;
+	static int delay_nom = 0;
+	static int counter = 0;
 
+
+//	if (counter % 300 == 0) {
+//
+//
+//	for(int i = 0; i < 300; i ++)
+//			audio_buf_high_f[i] = audio_buf_high[i];
+//	arm_float_to_q15(audio_buf_high_f, fft_in_buf, AUDIO_HIGH_BUF_SIZE);
+//
+//	arm_rfft_init_q15(&fft_instance, 300, 0, 1);
+//	arm_rfft_q15(&fft_instance, fft_in_buf, fft_out_buf);
+//
+//	arm_cmplx_mag_q15(fft_out_buf + 2, fft_out_buf_mag + 1, 300/2-1);
+//
+//	arm_rfft_init_q15(&ifft_instance, 300, 1, 1);
+//	arm_rfft_q15(&ifft_instance, fft_out_buf, ifft_out_buf);
+//	arm_shift_q15(ifft_out_buf, 7, ifft_out_buf, 300);
+//	arm_q15_to_float(ifft_out_buf, audio_buf_high_f, 300);
+//
+//	for(int i = 0; i < 300; i ++)
+//		audio_buf_high[i] = audio_buf_high_f[i];
+//	}
+//
+//	counter ++;
 
 	if(hsai == &hsai_BlockB1) return;
 
 	__disable_irq();
 	adc_get[0] = read_ADC_Channel(&hadc1, 0);
 	adc_get[1] = read_ADC_Channel(&hadc1, 3);
-	delay = (read_ADC_Channel(&hadc1, 4) - 2000) * 7 / 2048;
+	delay_nom = (read_ADC_Channel(&hadc1, 4) - 2000) * 64 / 2048;
 
 
 
-//	audio_buf_high[circ_offset_high] = (adc_get[0] << 4) - (1 << 15);
-	audio_buf_low[circ_offset_low] = (adc_get[1] << 4) - (1 << 15);
+	audio_buf_high[circ_offset_high] = (adc_get[0] << 4);// should be 0
+	audio_buf_low[circ_offset_low] = (adc_get[1] << 4);// - (1 << 15);
 
 	circ_offset_high = (circ_offset_high + 1) % AUDIO_HIGH_BUF_SIZE;
 	circ_offset_low = (circ_offset_low + 1) % AUDIO_LOW_BUF_SIZE;
 
-	int buf_index;
+
+	int dir = 1;
+	if (delay_nom < 0) dir = -1;
 	//Fill the 12 subwoofers
-	for(int i = 0; i < 12; i ++) {
-		buf_index = (delay * i + (AUDIO_LOW_BUF_SIZE >> 1) + circ_offset_low) % AUDIO_LOW_BUF_SIZE;
-		buf_index = MAX(buf_index, 0);
-		sai_fifo_a[i] = audio_buf_low[buf_index];
+	uint16_t buff_offset = ((AUDIO_LOW_BUF_SIZE >> 1) + AUDIO_LOW_BUF_SIZE + circ_offset_low);
+	uint16_t buff_index = buff_offset;
+	uint8_t i = 0;
+	int int_delay = 4 * delay_nom;
+	while (i < 12) {
+		buff_index = (int_delay / delay_denom + buff_offset + AUDIO_LOW_BUF_SIZE) % AUDIO_LOW_BUF_SIZE;
+		sai_fifo_a[(6 + i) % 12] = interpolate(buff_index,
+				(int_delay * dir) % delay_denom,
+				audio_buf_low, dir,
+				AUDIO_LOW_BUF_SIZE);
+		int_delay += delay_nom;
+		i ++;
 	}
-	//Fill the first 4 tweeters into the remaining space in DAC 1
-//	for(int i = 12; i < 16; i ++) {
-//		buf_index = delay * i + (AUDIO_HIGH_BUF_SIZE >> 1);
-//		buf_index = MIN(AUDIO_HIGH_BUF_SIZE, MAX(buf_index, 0));
-//		sai_fifo_a[i] = audio_buf_high[buf_index];
-//	}
-//	//Fill the remaining 16 tweeters into DAC 2
-//	for(int i = 16; i < 32; i ++) {
-//		buf_index = delay * i + (AUDIO_HIGH_BUF_SIZE  >> 1);
-//		buf_index = MIN(AUDIO_HIGH_BUF_SIZE, MAX(buf_index, 0));
-//		sai_fifo_b[i - 16] = audio_buf_high[buf_index];
-//	}
+//	Fill the first 4 tweeters into the remaining space in DAC 1
+	buff_offset = ((AUDIO_HIGH_BUF_SIZE >> 1) + AUDIO_HIGH_BUF_SIZE + circ_offset_high);
+	int_delay = 0;
+	while (i < 16) {
+		buff_index = (int_delay / delay_denom + buff_offset + AUDIO_HIGH_BUF_SIZE) % AUDIO_HIGH_BUF_SIZE;
+		sai_fifo_a[i] = interpolate(buff_index,
+				(int_delay * dir) % delay_denom,
+				audio_buf_high, dir,
+				AUDIO_HIGH_BUF_SIZE);
+		int_delay += delay_nom;
+		i++;
+	}
+////////	//Fill the remaining 16 tweeters into DAC 2
+	while (i < 32) {
+		buff_index = (int_delay / delay_denom + buff_offset + AUDIO_HIGH_BUF_SIZE) % AUDIO_HIGH_BUF_SIZE;
+		sai_fifo_b[i - 16] = interpolate(buff_index,
+				(int_delay * dir) % delay_denom,
+				audio_buf_high, dir,
+				AUDIO_HIGH_BUF_SIZE);
+		int_delay += delay_nom;
+		i++;
+	}
 	__enable_irq();
 ////	char msg[100];
 ////	sprintf(msg, "adc1 is %d; ", adc_get[0]);
 ////
-////	char msg1[100];
-////	sprintf(msg1, "adc2 is %d\r\n", adc_get[1]);
-////	HAL_UART_Transmit(&huart3, msg, strlen((char*)msg), HAL_MAX_DELAY);
+//	char msg1[100];
+//	sprintf(msg1, "adc2 is %d\r\n", delay_nom);
+//	HAL_UART_Transmit(&huart3, msg1, strlen((char*)msg1), HAL_MAX_DELAY);
 ////	HAL_UART_Transmit(&huart3, msg1, strlen((char*)msg1), HAL_MAX_DELAY);
 
 
@@ -156,14 +227,17 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 #define DAC1_ADDR 0x04
 #define DAC2_ADDR 0x24
 #define DAC_MUTE1 0x09
+#define DAC_MUTE2 0x0A
 #define PLL_CLK_CTRL0 0x00
 #define DAC_CTRL0 0x06
 #define DAC_CTRL1 0x07
 #define DAC_CTRL2 0x08
 
 
-uint8_t mute_data_DAC1 = 0x0;	//0 is normal operation, 1 is muted
-uint8_t mute_data_DAC2 = 0x0;
+uint8_t mute1_data_DAC1 = 0x00;	//0 is normal operation, 1 is muted
+uint8_t mute2_data_DAC1 = 0x00;	//0 is normal operation, 1 is muted
+uint8_t mute1_data_DAC2 = 0x00;
+uint8_t mute2_data_DAC2 = 0x00;	//0 is normal operation, 1 is muted
 uint8_t pll_clk_data = 0b01000001; //assert reset and pllin = 01 to use DLRCLK reference
 uint8_t dac_ctrl0 = 0b01100000;
 uint8_t dac_ctrl1 = 0b10000100;
@@ -231,10 +305,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_SAI1_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_I2C2_Init();
   MX_USART3_UART_Init();
+  MX_SAI1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
@@ -269,13 +343,15 @@ int main(void)
 
 
   write_DAC1(PLL_CLK_CTRL0, &pll_clk_data);
-  write_DAC1(DAC_MUTE1, &mute_data_DAC1);
+  write_DAC1(DAC_MUTE1, &mute1_data_DAC1);
+  write_DAC1(DAC_MUTE2, &mute2_data_DAC1);
   write_DAC1(DAC_CTRL0, &dac_ctrl0);
   write_DAC1(DAC_CTRL1, &dac_ctrl1);
   write_DAC1(DAC_CTRL2, &dac_ctrl2);
 
   write_DAC2(PLL_CLK_CTRL0, &pll_clk_data);
-write_DAC2(DAC_MUTE1, &mute_data_DAC2);
+  write_DAC2(DAC_MUTE1, &mute1_data_DAC2);
+    write_DAC2(DAC_MUTE2, &mute2_data_DAC2);
 write_DAC2(DAC_CTRL0, &dac_ctrl0);
 write_DAC2(DAC_CTRL1, &dac_ctrl1);
 write_DAC2(DAC_CTRL2, &dac_ctrl2);
@@ -311,7 +387,7 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -321,10 +397,17 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 72;
+  RCC_OscInitStruct.PLL.PLLN = 216;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 3;
+  RCC_OscInitStruct.PLL.PLLQ = 9;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
@@ -335,10 +418,10 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_7) != HAL_OK)
   {
     Error_Handler();
   }
@@ -389,7 +472,7 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV8;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -454,7 +537,7 @@ static void MX_I2C2_Init(void)
 
   /* USER CODE END I2C2_Init 1 */
   hi2c2.Instance = I2C2;
-  hi2c2.Init.Timing = 0x601015E9;
+  hi2c2.Init.Timing = 0x80102AFF;
   hi2c2.Init.OwnAddress1 = 0;
   hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -506,20 +589,20 @@ static void MX_SAI1_Init(void)
   hsai_BlockA1.Init.AudioMode = SAI_MODEMASTER_TX;
   hsai_BlockA1.Init.DataSize = SAI_DATASIZE_16;
   hsai_BlockA1.Init.FirstBit = SAI_FIRSTBIT_MSB;
-  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
+  hsai_BlockA1.Init.ClockStrobing = SAI_CLOCKSTROBING_RISINGEDGE;
   hsai_BlockA1.Init.Synchro = SAI_ASYNCHRONOUS;
   hsai_BlockA1.Init.OutputDrive = SAI_OUTPUTDRIVE_DISABLE;
   hsai_BlockA1.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
   hsai_BlockA1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_EMPTY;
   hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_MCKDIV;
-  hsai_BlockA1.Init.Mckdiv = 7;
+  hsai_BlockA1.Init.Mckdiv = 2;
   hsai_BlockA1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
   hsai_BlockA1.Init.MonoStereoMode = SAI_STEREOMODE;
   hsai_BlockA1.Init.CompandingMode = SAI_NOCOMPANDING;
   hsai_BlockA1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
   hsai_BlockA1.FrameInit.FrameLength = 256;
   hsai_BlockA1.FrameInit.ActiveFrameLength = 1;
-  hsai_BlockA1.FrameInit.FSDefinition = SAI_FS_CHANNEL_IDENTIFICATION;
+  hsai_BlockA1.FrameInit.FSDefinition = SAI_FS_STARTFRAME;
   hsai_BlockA1.FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
   hsai_BlockA1.FrameInit.FSOffset = SAI_FS_BEFOREFIRSTBIT;
   hsai_BlockA1.SlotInit.FirstBitOffset = 0;
@@ -545,9 +628,9 @@ static void MX_SAI1_Init(void)
   hsai_BlockB1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
   hsai_BlockB1.FrameInit.FrameLength = 256;
   hsai_BlockB1.FrameInit.ActiveFrameLength = 1;
-  hsai_BlockB1.FrameInit.FSDefinition = SAI_FS_CHANNEL_IDENTIFICATION;
-  hsai_BlockB1.FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
-  hsai_BlockB1.FrameInit.FSOffset = SAI_FS_BEFOREFIRSTBIT;
+  hsai_BlockB1.FrameInit.FSDefinition = SAI_FS_STARTFRAME;
+  hsai_BlockB1.FrameInit.FSPolarity = SAI_FS_ACTIVE_LOW;
+  hsai_BlockB1.FrameInit.FSOffset = SAI_FS_FIRSTBIT;
   hsai_BlockB1.SlotInit.FirstBitOffset = 0;
   hsai_BlockB1.SlotInit.SlotSize = SAI_SLOTSIZE_DATASIZE;
   hsai_BlockB1.SlotInit.SlotNumber = 16;
