@@ -23,6 +23,12 @@
 /* USER CODE BEGIN Includes */
 #include "math.h"
 #include "arm_math.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+//#include "stm32f7xx_ll_usart.h"
+//#include "stm32f7xx_hal.h"
+#include "stm32f7xx_hal_uart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -86,28 +92,53 @@ q15_t fft_out_buf_mag[300*2];
 q15_t ifft_out_buf[300];
 float audio_buf_high_f[300];
 
+// UART SERIAL COMMUNICATION
+UART_HandleTypeDef huart3;
+//volatile uint8_t receivedData;
+volatile char receivedData;
+// uint64_t counter = 0;
+#define MAX_COMMAND_LENGTH 100
+char commandBuffer[MAX_COMMAND_LENGTH];
+int commandLength = 0;
+int USB_input_X = 0;
+int USB_input_Y = 0;
+int USB_input_Dist = 0;
+int USB_input_Vol = 0;
+// TEST
+uint8_t uart3_rx_byte;
+
+// Function prototypes
+static void MX_USART3_UART_Init(void);
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
+
+
+
 /* Reference index at which max energy of bin ocuurs */
 uint32_t refIndex = 213, testIndex = 0;
 /* --------------------------------------
  *
  *
  */
-#define AUDIO_LOW_BUF_SIZE 180
-#define AUDIO_HIGH_BUF_SIZE 300
-#define AUDIO_LOW_BUF_SIZE_HALF 90
-#define AUDIO_HIGH_BUF_SIZE_HALF 150
+#define AUDIO_LOW_BUF_SIZE 360
+#define AUDIO_HIGH_BUF_SIZE 400
+#define AUDIO_LOW_BUF_SIZE_HALF 180
+#define AUDIO_HIGH_BUF_SIZE_HALF 200
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
+#define NUM_LOW_SPEAKERS 0
+#define NUM_HIGH_SPEAKERS 32
 uint16_t adc_get[2];
 uint32_t sai_fifo_a[16];
 uint32_t sai_fifo_b[16];
 uint16_t audio_buf_low[AUDIO_LOW_BUF_SIZE];
 uint16_t audio_buf_high[AUDIO_HIGH_BUF_SIZE];
-uint8_t delay_denom = 8;
+uint8_t delay_denom = 255;
+int* delay_nom;
+int* delay_nom_low;
 
 
 static inline int16_t interpolate(uint16_t x, uint8_t delay_n, uint16_t* array, int dir, uint16_t size) {
-	return ((array[x % size] * (delay_denom - delay_n)+ array[(x + dir + size) % size] * delay_n) >> 3) - 32768;
+	return ((array[x % size] * (delay_denom - delay_n)+ array[(x + dir + size) % size] * delay_n) >> 8) - 32768;
 }
 
 uint16_t read_ADC_Channel(ADC_HandleTypeDef* hadc, int channel) {
@@ -131,8 +162,7 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 
 	static int circ_offset_low = 0;
 	static int circ_offset_high = 0;
-	static int delay_nom = 0;
-	static int counter = 0;
+	// static int counter = 0;
 
 
 //	if (counter % 300 == 0) {
@@ -159,11 +189,13 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 //	counter ++;
 
 	if(hsai == &hsai_BlockB1) return;
-
 	__disable_irq();
+//	adc_get[0] = read_ADC_Channel(&hadc1, 0);
+//	adc_get[1] = read_ADC_Channel(&hadc1, 3);
 	adc_get[0] = read_ADC_Channel(&hadc1, 0);
-	adc_get[1] = read_ADC_Channel(&hadc1, 3);
-	delay_nom = (read_ADC_Channel(&hadc1, 4) - 2000) * 64 / 2048;
+	adc_get[1] = adc_get[0];
+//	adc_get[0] = adc_get[1];
+//	delay_nom = (read_ADC_Channel(&hadc1, 4) - 2000) * 64 / 2048;
 
 
 
@@ -175,19 +207,19 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 
 
 	int dir = 1;
-	if (delay_nom < 0) dir = -1;
+	if (*delay_nom < 0) dir = -1;
 	//Fill the 12 subwoofers
 	uint16_t buff_offset = ((AUDIO_LOW_BUF_SIZE >> 1) + AUDIO_LOW_BUF_SIZE + circ_offset_low);
 	uint16_t buff_index = buff_offset;
 	uint8_t i = 0;
-	int int_delay = 4 * delay_nom;
-	while (i < 12) {
+	int int_delay = 0;
+	while (i < NUM_LOW_SPEAKERS) {
 		buff_index = (int_delay / delay_denom + buff_offset + AUDIO_LOW_BUF_SIZE) % AUDIO_LOW_BUF_SIZE;
-		sai_fifo_a[(6 + i) % 12] = interpolate(buff_index,
+		sai_fifo_a[i] = interpolate(buff_index,
 				(int_delay * dir) % delay_denom,
 				audio_buf_low, dir,
 				AUDIO_LOW_BUF_SIZE);
-		int_delay += delay_nom;
+		int_delay += *delay_nom_low;
 		i ++;
 	}
 //	Fill the first 4 tweeters into the remaining space in DAC 1
@@ -199,7 +231,7 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 				(int_delay * dir) % delay_denom,
 				audio_buf_high, dir,
 				AUDIO_HIGH_BUF_SIZE);
-		int_delay += delay_nom;
+		int_delay += *delay_nom;
 		i++;
 	}
 ////////	//Fill the remaining 16 tweeters into DAC 2
@@ -209,7 +241,7 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 				(int_delay * dir) % delay_denom,
 				audio_buf_high, dir,
 				AUDIO_HIGH_BUF_SIZE);
-		int_delay += delay_nom;
+		int_delay += *delay_nom;
 		i++;
 	}
 	__enable_irq();
@@ -219,7 +251,7 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 //	char msg1[100];
 //	sprintf(msg1, "adc2 is %d\r\n", delay_nom);
 //	HAL_UART_Transmit(&huart3, msg1, strlen((char*)msg1), HAL_MAX_DELAY);
-////	HAL_UART_Transmit(&huart3, msg1, strlen((char*)msg1), HAL_MAX_DELAY);
+//	HAL_UART_Transmit(&huart3, msg1, strlen((char*)msg1), HAL_MAX_DELAY);
 
 
 }
@@ -232,6 +264,7 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 #define DAC_CTRL0 0x06
 #define DAC_CTRL1 0x07
 #define DAC_CTRL2 0x08
+#define master_volume_control 0x0B
 
 
 uint8_t mute1_data_DAC1 = 0x00;	//0 is normal operation, 1 is muted
@@ -242,7 +275,7 @@ uint8_t pll_clk_data = 0b01000001; //assert reset and pllin = 01 to use DLRCLK r
 uint8_t dac_ctrl0 = 0b01100000;
 uint8_t dac_ctrl1 = 0b10000100;
 uint8_t dac_ctrl2 = 0b10000;
-
+uint8_t dac1_vol = 0b00010000;
 
 
 void write_DAC1(uint8_t reg, uint8_t* data) {
@@ -270,6 +303,67 @@ void write_DAC2(uint8_t reg, uint8_t* data) {
 		HAL_UART_Transmit(&huart3, str_success, strlen((char*)str_success), HAL_MAX_DELAY);
 	}
 }
+
+
+// UART INTERRUPT SERIAL COM
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	// ECHO TEST
+	//if (huart->Instance == USART3) // Check if the interrupt comes from UART3
+	    //{
+			//char uit[24] = "TEST 1234 !!!!\r\n";
+			//HAL_UART_Transmit(&huart3, uit, strlen((char*)uit), HAL_MAX_DELAY);
+	        // Echo the received byte back
+	        //HAL_UART_Transmit(&huart3, (uint8_t *)&uart3_rx_byte, 1, 10);
+
+	        // Re-enable the UART receive interrupt
+	        //HAL_UART_Receive_IT(&huart3, (uint8_t *)&uart3_rx_byte, 1);
+	    //}
+
+    if (huart->Instance == USART3)  // Check which UART generated the interrupt (3)
+    {
+        // Append the received character to the buffer, if it's not the newline
+        // Also check if we haven't exceeded our buffer size (100 for now)
+        if (receivedData != '\n' && commandLength < MAX_COMMAND_LENGTH - 1)
+        {
+            commandBuffer[commandLength++] = receivedData;
+        }
+        else if (receivedData == '\n')  // Received a newline character
+        {
+            // Ensure the string is null-terminated
+            commandBuffer[commandLength] = '\0';
+
+            if (commandLength > 0) {  // Check if there's something to process
+
+            	// Test print
+//                char response[MAX_COMMAND_LENGTH + 20];  // Allocate enough space for response message
+//                HAL_UART_Transmit(&huart3, (uint8_t*)response, strlen(response), HAL_MAX_DELAY);
+
+                // // // PROCESS COMMAND HERE // // //
+
+//                if (commandBuffer[0] == 'T' && commandLength == 1){
+//                    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
+//                }
+                                // USB_input_Vol
+			 *delay_nom = 2 * (atoi(&commandBuffer[9]) - 80);
+			 *delay_nom_low = 3 * *delay_nom;
+//                                 sprintf(response, "Delay: %d\n", *delay_nom);
+//                                 HAL_UART_Transmit(&huart3, (uint8_t*)response, strlen(response), HAL_MAX_DELAY);
+
+
+
+            }
+
+            // Reset the buffer and counter for the next command
+            memset(commandBuffer, 0, MAX_COMMAND_LENGTH);
+            commandLength = 0;
+        }
+
+        // Prepare to receive the next character regardless
+        HAL_UART_Receive_IT(&huart3, (uint8_t*)&receivedData, 1);
+    }
+}
+
 
 /* USER CODE END 0 */
 
@@ -311,8 +405,7 @@ int main(void)
   MX_SAI1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-
-
+  HAL_UART_Receive_IT(&huart3, (uint8_t *)&uart3_rx_byte, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -322,12 +415,12 @@ int main(void)
 //  HAL_ADC_Start_DMA(&hadc1, &adc_get, 2);
   sai_fifo_a[0] = 0x7000U;
   sai_fifo_b[0] = 0x7000U;
+  *delay_nom = 0;
   int error;
   error = HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint32_t * )&sai_fifo_a, 16);
   char error_msg[50];
   sprintf(error_msg, "Error is %d on DMA1\r\n", error);
   HAL_UART_Transmit(&huart3, error_msg, strlen((char*)error_msg), HAL_MAX_DELAY);
-
 
   error = HAL_SAI_Transmit_DMA(&hsai_BlockB1, (uint32_t * )&sai_fifo_b, 16);
   sprintf(error_msg, "Error is %d on DMA2\r\n", error);
@@ -335,12 +428,9 @@ int main(void)
 
   //HAL_Delay(1000);
 
-
-
   sprintf(error_msg, "UART good!\r\n");
 
   HAL_UART_Transmit(&huart3, error_msg, strlen((char*)error_msg), HAL_MAX_DELAY);
-
 
   write_DAC1(PLL_CLK_CTRL0, &pll_clk_data);
   write_DAC1(DAC_MUTE1, &mute1_data_DAC1);
@@ -348,19 +438,20 @@ int main(void)
   write_DAC1(DAC_CTRL0, &dac_ctrl0);
   write_DAC1(DAC_CTRL1, &dac_ctrl1);
   write_DAC1(DAC_CTRL2, &dac_ctrl2);
+  write_DAC1(master_volume_control, &dac1_vol);
+
 
   write_DAC2(PLL_CLK_CTRL0, &pll_clk_data);
   write_DAC2(DAC_MUTE1, &mute1_data_DAC2);
-    write_DAC2(DAC_MUTE2, &mute2_data_DAC2);
-write_DAC2(DAC_CTRL0, &dac_ctrl0);
-write_DAC2(DAC_CTRL1, &dac_ctrl1);
-write_DAC2(DAC_CTRL2, &dac_ctrl2);
-
+  write_DAC2(DAC_MUTE2, &mute2_data_DAC2);
+  write_DAC2(DAC_CTRL0, &dac_ctrl0);
+  write_DAC2(DAC_CTRL1, &dac_ctrl1);
+  write_DAC2(DAC_CTRL2, &dac_ctrl2);
 
   __enable_irq();
 
-
-
+  // Start reception with interrupt
+  HAL_UART_Receive_IT(&huart3, &receivedData, 1);
   while (1)
   {
 
@@ -472,7 +563,7 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV8;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV6;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -755,7 +846,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD3_Pin|LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin, GPIO_PIN_RESET);
@@ -787,6 +878,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USB_OverCurrent_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LD2_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
